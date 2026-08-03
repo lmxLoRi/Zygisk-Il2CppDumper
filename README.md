@@ -1,21 +1,31 @@
 # Zygisk-Il2CppDumper
-Il2CppDumper with Zygisk, dump il2cpp data at runtime, can bypass protection, encryption and obfuscation.
 
-中文说明请戳[这里](README.zh-CN.md)
+Runtime IL2CPP metadata dumping through Zygisk, designed primarily for AI-assisted program analysis.
 
-## How to use
-1. Install [Magisk](https://github.com/topjohnwu/Magisk) v24 or later and enable Zygisk
-2. Build module
-   - GitHub Actions
-      1. Fork this repo
-      2. Go to the **Actions** tab in your forked repo
-      3. In the left sidebar, click the **Build** workflow.
-      4. Above the list of workflow runs, select **Run workflow**
-      5. Input the game package name and click **Run workflow**
-      6. Wait for the action to complete and download the artifact
-   - Android Studio
-      1. Download the source code
-      2. Edit `game.h`, modify `GamePackageName` to the game package name
-      3. Use Android Studio to run the gradle task `:module:assembleRelease` to compile, the zip package will be generated in the `out` folder
-3. Install module in Magisk
-4. Start the game, `dump.cs` will be generated in the `/data/data/GamePackageName/files/` directory
+[中文说明](README.zh-CN.md)
+
+## Usage
+
+1. Install Magisk 24 or later and enable Zygisk.
+2. Build the generic module with GitHub Actions, Gradle, or `build_ndk_standalone.sh`.
+3. Install the generated ZIP in Magisk.
+4. Select target applications in the module Web UI and save the selection.
+5. Start a target application.
+
+The target application's `files` directory receives:
+
+- `dump.cs`: C#-like types, fields, properties, and method declarations.
+- `managed.json`: complete managed runtime method semantics, including methods without native code.
+- `native.json`: native functions deduplicated by RVA and their many-to-many managed bindings.
+
+The first native schema version contains only reliably observed runtime method pointers. Check `Capabilities` before consuming registration metadata, generic instances, strings, or metadata slots.
+
+## Standalone Build
+
+Place an NDK sysroot/resource subset at `ndk-slim`, or set `NDK` to its location:
+
+```bash
+bash build_ndk_standalone.sh
+```
+
+Override `NDK`, `CLANG`, `CLANGXX`, `LLD`, or `LLVM_STRIP` when needed.

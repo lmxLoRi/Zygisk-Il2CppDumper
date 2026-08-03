@@ -135,6 +135,12 @@ typedef struct Il2CppObject {
     MonitorData *monitor;
 } Il2CppObject;
 
+struct Il2CppString {
+    Il2CppObject object;
+    int32_t length;
+    Il2CppChar chars[1];
+};
+
 typedef struct Il2CppArray {
     Il2CppObject obj;
     Il2CppArrayBounds *bounds;

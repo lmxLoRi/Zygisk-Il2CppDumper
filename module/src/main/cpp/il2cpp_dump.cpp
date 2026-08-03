@@ -11,11 +11,14 @@
 #include <vector>
 #include <sstream>
 #include <fstream>
+#include <iomanip>
+#include <cstdio>
 #include <unistd.h>
 #include "xdl.h"
 #include "log.h"
 #include "il2cpp-tabledefs.h"
 #include "il2cpp-class.h"
+#include "semantic_dump.h"
 
 #define DO_API(r, n, p) r (*n) p
 
@@ -23,7 +26,7 @@
 
 #undef DO_API
 
-static uint64_t il2cpp_base = 0;
+uint64_t il2cpp_base = 0;
 
 void init_il2cpp_api(void *handle) {
 #define DO_API(r, n, p) {                      \
@@ -85,6 +88,7 @@ std::string get_method_modifier(uint32_t flags) {
 }
 
 bool _il2cpp_type_is_byref(const Il2CppType *type) {
+    if (!type) return false;
     auto byref = type->byref;
     if (il2cpp_type_is_byref) {
         byref = il2cpp_type_is_byref(type);
@@ -92,34 +96,134 @@ bool _il2cpp_type_is_byref(const Il2CppType *type) {
     return byref;
 }
 
+std::string escape_csharp_string(const Il2CppChar *chars, int32_t length) {
+    std::stringstream output;
+    for (int32_t i = 0; chars && i < length; ++i) {
+        const uint16_t c = chars[i];
+        switch (c) {
+            case '\\': output << "\\\\"; break;
+            case '"': output << "\\\""; break;
+            case '\n': output << "\\n"; break;
+            case '\r': output << "\\r"; break;
+            case '\t': output << "\\t"; break;
+            case '\0': output << "\\0"; break;
+            default:
+                if (c >= 0x20 && c <= 0x7e) {
+                    output << static_cast<char>(c);
+                } else {
+                    output << "\\u" << std::hex << std::setw(4) << std::setfill('0') << c;
+                }
+        }
+    }
+    return output.str();
+}
+
+bool get_literal_value(FieldInfo *field, const Il2CppType *field_type, std::string &value) {
+    if (!field || !field_type || !il2cpp_field_static_get_value) return false;
+
+    const Il2CppType *storage_type = field_type;
+    if (auto klass = il2cpp_class_from_type(field_type);
+        klass && il2cpp_class_is_enum(klass) && il2cpp_class_enum_basetype) {
+        const Il2CppType *enum_type = il2cpp_class_enum_basetype(klass);
+        if (enum_type) storage_type = enum_type;
+    }
+
+    std::stringstream output;
+    switch (storage_type->type) {
+        case IL2CPP_TYPE_BOOLEAN: {
+            bool item = false;
+            il2cpp_field_static_get_value(field, &item);
+            value = item ? "true" : "false";
+            return true;
+        }
+        case IL2CPP_TYPE_CHAR: {
+            Il2CppChar item = 0;
+            il2cpp_field_static_get_value(field, &item);
+            output << "'\\u" << std::hex << std::setw(4) << std::setfill('0') << item << "'";
+            value = output.str();
+            return true;
+        }
+        case IL2CPP_TYPE_I1: {
+            int8_t item = 0; il2cpp_field_static_get_value(field, &item);
+            value = std::to_string(item); return true;
+        }
+        case IL2CPP_TYPE_U1: {
+            uint8_t item = 0; il2cpp_field_static_get_value(field, &item);
+            value = std::to_string(item); return true;
+        }
+        case IL2CPP_TYPE_I2: {
+            int16_t item = 0; il2cpp_field_static_get_value(field, &item);
+            value = std::to_string(item); return true;
+        }
+        case IL2CPP_TYPE_U2: {
+            uint16_t item = 0; il2cpp_field_static_get_value(field, &item);
+            value = std::to_string(item); return true;
+        }
+        case IL2CPP_TYPE_I4: {
+            int32_t item = 0; il2cpp_field_static_get_value(field, &item);
+            value = std::to_string(item); return true;
+        }
+        case IL2CPP_TYPE_U4: {
+            uint32_t item = 0; il2cpp_field_static_get_value(field, &item);
+            value = std::to_string(item) + "u"; return true;
+        }
+        case IL2CPP_TYPE_I8: {
+            int64_t item = 0; il2cpp_field_static_get_value(field, &item);
+            value = std::to_string(item) + "L"; return true;
+        }
+        case IL2CPP_TYPE_U8: {
+            uint64_t item = 0; il2cpp_field_static_get_value(field, &item);
+            value = std::to_string(item) + "UL"; return true;
+        }
+        case IL2CPP_TYPE_R4: {
+            float item = 0; il2cpp_field_static_get_value(field, &item);
+            output << item << 'f'; value = output.str(); return true;
+        }
+        case IL2CPP_TYPE_R8: {
+            double item = 0; il2cpp_field_static_get_value(field, &item);
+            output << item; value = output.str(); return true;
+        }
+        case IL2CPP_TYPE_STRING: {
+            Il2CppString *item = nullptr;
+            il2cpp_field_static_get_value(field, &item);
+            value = item ? "\"" + escape_csharp_string(item->chars, item->length) + "\"" : "null";
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
 std::string dump_method(Il2CppClass *klass) {
     std::stringstream outPut;
     outPut << "\n\t// Methods\n";
+    const bool is_interface = (il2cpp_class_get_flags(klass) & TYPE_ATTRIBUTE_INTERFACE) != 0;
     void *iter = nullptr;
     while (auto method = il2cpp_class_get_methods(klass, &iter)) {
         //TODO attribute
-        if (method->methodPointer) {
+        uint32_t iflags = 0;
+        auto flags = il2cpp_method_get_flags(method, &iflags);
+        const bool has_body = !(flags & METHOD_ATTRIBUTE_ABSTRACT) && !is_interface &&
+                              !(flags & METHOD_ATTRIBUTE_PINVOKE_IMPL);
+        if (method->methodPointer && has_body) {
             outPut << "\t// RVA: 0x";
             outPut << std::hex << (uint64_t) method->methodPointer - il2cpp_base;
             outPut << " VA: 0x";
             outPut << std::hex << (uint64_t) method->methodPointer;
         } else {
-            outPut << "\t// RVA: 0x VA: 0x0";
+            outPut << "\t// RVA: unavailable";
         }
         /*if (method->slot != 65535) {
             outPut << " Slot: " << std::dec << method->slot;
         }*/
         outPut << "\n\t";
-        uint32_t iflags = 0;
-        auto flags = il2cpp_method_get_flags(method, &iflags);
         outPut << get_method_modifier(flags);
         //TODO genericContainerIndex
         auto return_type = il2cpp_method_get_return_type(method);
         if (_il2cpp_type_is_byref(return_type)) {
             outPut << "ref ";
         }
-        auto return_class = il2cpp_class_from_type(return_type);
-        outPut << il2cpp_class_get_name(return_class) << " " << il2cpp_method_get_name(method)
+        outPut << il2cpp_type_display_name(return_type, false) << " " << il2cpp_method_get_name(method)
                << "(";
         auto param_count = il2cpp_method_get_param_count(method);
         for (int i = 0; i < param_count; ++i) {
@@ -141,15 +245,14 @@ std::string dump_method(Il2CppClass *klass) {
                     outPut << "[Out] ";
                 }
             }
-            auto parameter_class = il2cpp_class_from_type(param);
-            outPut << il2cpp_class_get_name(parameter_class) << " "
+            outPut << il2cpp_type_display_name(param, false) << " "
                    << il2cpp_method_get_param_name(method, i);
             outPut << ", ";
         }
         if (param_count > 0) {
             outPut.seekp(-2, outPut.cur);
         }
-        outPut << ") { }\n";
+        outPut << (has_body ? ") { }\n" : ");\n");
         //TODO GenericInstMethod
     }
     return outPut.str();
@@ -166,18 +269,18 @@ std::string dump_property(Il2CppClass *klass) {
         auto set = il2cpp_property_get_set_method(prop);
         auto prop_name = il2cpp_property_get_name(prop);
         outPut << "\t";
-        Il2CppClass *prop_class = nullptr;
+        const Il2CppType *prop_type = nullptr;
         uint32_t iflags = 0;
         if (get) {
             outPut << get_method_modifier(il2cpp_method_get_flags(get, &iflags));
-            prop_class = il2cpp_class_from_type(il2cpp_method_get_return_type(get));
+            prop_type = il2cpp_method_get_return_type(get);
         } else if (set) {
             outPut << get_method_modifier(il2cpp_method_get_flags(set, &iflags));
             auto param = il2cpp_method_get_param(set, 0);
-            prop_class = il2cpp_class_from_type(param);
+            prop_type = param;
         }
-        if (prop_class) {
-            outPut << il2cpp_class_get_name(prop_class) << " " << prop_name << " { ";
+        if (prop_type) {
+            outPut << il2cpp_type_display_name(prop_type, false) << " " << prop_name << " { ";
             if (get) {
                 outPut << "get; ";
             }
@@ -197,7 +300,6 @@ std::string dump_property(Il2CppClass *klass) {
 std::string dump_field(Il2CppClass *klass) {
     std::stringstream outPut;
     outPut << "\n\t// Fields\n";
-    auto is_enum = il2cpp_class_is_enum(klass);
     void *iter = nullptr;
     while (auto field = il2cpp_class_get_fields(klass, &iter)) {
         //TODO attribute
@@ -233,15 +335,16 @@ std::string dump_field(Il2CppClass *klass) {
             }
         }
         auto field_type = il2cpp_field_get_type(field);
-        auto field_class = il2cpp_class_from_type(field_type);
-        outPut << il2cpp_class_get_name(field_class) << " " << il2cpp_field_get_name(field);
-        //TODO 获取构造函数初始化后的字段值
-        if (attrs & FIELD_ATTRIBUTE_LITERAL && is_enum) {
-            uint64_t val = 0;
-            il2cpp_field_static_get_value(field, &val);
-            outPut << " = " << std::dec << val;
+        outPut << il2cpp_type_display_name(field_type, false) << " " << il2cpp_field_get_name(field);
+        if (attrs & FIELD_ATTRIBUTE_LITERAL) {
+            std::string literal;
+            if (get_literal_value(field, field_type, literal)) outPut << " = " << literal;
         }
-        outPut << "; // 0x" << std::hex << il2cpp_field_get_offset(field) << "\n";
+        outPut << ';';
+        if (!(attrs & FIELD_ATTRIBUTE_LITERAL)) {
+            outPut << " // 0x" << std::hex << il2cpp_field_get_offset(field);
+        }
+        outPut << "\n";
     }
     return outPut.str();
 }
@@ -294,18 +397,18 @@ std::string dump_type(const Il2CppType *type) {
     } else {
         outPut << "class ";
     }
-    outPut << il2cpp_class_get_name(klass); //TODO genericContainerIndex
+    outPut << il2cpp_type_display_name(type, false); //TODO generic parameter declarations
     std::vector<std::string> extends;
     auto parent = il2cpp_class_get_parent(klass);
     if (!is_valuetype && !is_enum && parent) {
         auto parent_type = il2cpp_class_get_type(parent);
         if (parent_type->type != IL2CPP_TYPE_OBJECT) {
-            extends.emplace_back(il2cpp_class_get_name(parent));
+            extends.emplace_back(il2cpp_type_display_name(parent_type, false));
         }
     }
     void *iter = nullptr;
     while (auto itf = il2cpp_class_get_interfaces(klass, &iter)) {
-        extends.emplace_back(il2cpp_class_get_name(itf));
+        extends.emplace_back(il2cpp_type_display_name(il2cpp_class_get_type(itf), false));
     }
     if (!extends.empty()) {
         outPut << " : " << extends[0];
@@ -322,81 +425,135 @@ std::string dump_type(const Il2CppType *type) {
     return outPut.str();
 }
 
-void il2cpp_api_init(void *handle) {
+bool il2cpp_api_init(void *handle) {
     LOGI("il2cpp_handle: %p", handle);
     init_il2cpp_api(handle);
-    if (il2cpp_domain_get_assemblies) {
-        Dl_info dlInfo;
-        if (dladdr((void *) il2cpp_domain_get_assemblies, &dlInfo)) {
-            il2cpp_base = reinterpret_cast<uint64_t>(dlInfo.dli_fbase);
-        }
-        LOGI("il2cpp_base: %" PRIx64"", il2cpp_base);
-    } else {
-        LOGE("Failed to initialize il2cpp api.");
-        return;
+
+    if (!il2cpp_domain_get || !il2cpp_domain_get_assemblies || !il2cpp_assembly_get_image ||
+        !il2cpp_image_get_name || !il2cpp_class_get_type || !il2cpp_class_from_type ||
+        !il2cpp_class_get_name || !il2cpp_class_get_namespace || !il2cpp_class_get_flags ||
+        !il2cpp_class_is_valuetype || !il2cpp_class_is_enum || !il2cpp_class_get_parent ||
+        !il2cpp_class_get_interfaces || !il2cpp_class_get_fields || !il2cpp_class_get_properties ||
+        !il2cpp_class_get_methods || !il2cpp_field_get_flags || !il2cpp_field_get_type ||
+        !il2cpp_field_get_name || !il2cpp_field_get_offset || !il2cpp_property_get_get_method ||
+        !il2cpp_property_get_set_method || !il2cpp_property_get_name || !il2cpp_method_get_flags ||
+        !il2cpp_method_get_return_type || !il2cpp_method_get_name || !il2cpp_method_get_param_count ||
+        !il2cpp_method_get_param || !il2cpp_method_get_param_name) {
+        LOGE("Required il2cpp APIs are missing; dump aborted");
+        return false;
     }
-    while (!il2cpp_is_vm_thread(nullptr)) {
+
+    Dl_info dlInfo;
+    if (dladdr(reinterpret_cast<void *>(il2cpp_domain_get_assemblies), &dlInfo)) {
+        il2cpp_base = reinterpret_cast<uint64_t>(dlInfo.dli_fbase);
+    }
+    if (!il2cpp_base) {
+        LOGE("Failed to resolve libil2cpp.so image base");
+        return false;
+    }
+    LOGI("il2cpp_base: %" PRIx64, il2cpp_base);
+
+    while (il2cpp_is_vm_thread && !il2cpp_is_vm_thread(nullptr)) {
         LOGI("Waiting for il2cpp_init...");
         sleep(1);
     }
     auto domain = il2cpp_domain_get();
-    il2cpp_thread_attach(domain);
+    while (!domain) {
+        LOGI("Waiting for il2cpp domain...");
+        sleep(1);
+        domain = il2cpp_domain_get();
+    }
+    if (il2cpp_thread_attach) il2cpp_thread_attach(domain);
+    return true;
 }
 
 void il2cpp_dump(const char *outDir) {
     LOGI("dumping...");
-    size_t size;
+    size_t size = 0;
     auto domain = il2cpp_domain_get();
     auto assemblies = il2cpp_domain_get_assemblies(domain, &size);
-    std::stringstream imageOutput;
-    for (int i = 0; i < size; ++i) {
-        auto image = il2cpp_assembly_get_image(assemblies[i]);
-        imageOutput << "// Image " << i << ": " << il2cpp_image_get_name(image) << "\n";
+    if (!assemblies) {
+        LOGE("Failed to get il2cpp assemblies");
+        return;
     }
-    std::vector<std::string> outPuts;
-    if (il2cpp_image_get_class) {
+
+    std::stringstream imageOutput;
+    for (size_t i = 0; i < size; ++i) {
+        auto image = il2cpp_assembly_get_image(assemblies[i]);
+        const char *imageName = image ? il2cpp_image_get_name(image) : nullptr;
+        imageOutput << "// Image " << i << ": " << (imageName ? imageName : "Unknown") << "\n";
+    }
+
+    const std::string filesDir = std::string(outDir) + "/files";
+    const std::string outPath = filesDir + "/dump.cs";
+    const std::string temporaryPath = outPath + ".tmp";
+    std::ofstream outStream(temporaryPath, std::ios::out | std::ios::trunc);
+    if (!outStream.is_open()) {
+        LOGE("Failed to open %s", temporaryPath.c_str());
+        return;
+    }
+    outStream << imageOutput.str();
+    SemanticDumper semanticDumper;
+
+    if (il2cpp_image_get_class && il2cpp_image_get_class_count) {
         LOGI("Version greater than 2018.3");
-        //使用il2cpp_image_get_class
-        for (int i = 0; i < size; ++i) {
+        for (size_t i = 0; i < size; ++i) {
             auto image = il2cpp_assembly_get_image(assemblies[i]);
-            std::stringstream imageStr;
-            imageStr << "\n// Dll : " << il2cpp_image_get_name(image);
+            if (!image) continue;
+            const char *imageName = il2cpp_image_get_name(image);
+            outStream << "\n// Dll : " << (imageName ? imageName : "Unknown") << "\n";
             auto classCount = il2cpp_image_get_class_count(image);
-            for (int j = 0; j < classCount; ++j) {
+            for (size_t j = 0; j < classCount; ++j) {
                 auto klass = il2cpp_image_get_class(image, j);
+                if (!klass) continue;
+                semanticDumper.collect_class(imageName, const_cast<Il2CppClass *>(klass));
                 auto type = il2cpp_class_get_type(const_cast<Il2CppClass *>(klass));
-                //LOGD("type name : %s", il2cpp_type_get_name(type));
-                auto outPut = imageStr.str() + dump_type(type);
-                outPuts.push_back(outPut);
+                if (type) outStream << dump_type(type);
             }
         }
     } else {
         LOGI("Version less than 2018.3");
-        //使用反射
+        if (!il2cpp_get_corlib || !il2cpp_class_from_name || !il2cpp_class_get_method_from_name ||
+            !il2cpp_string_new || !il2cpp_class_from_system_type) {
+            LOGE("Reflection APIs required for this Unity version are missing");
+            outStream.close();
+            std::remove(temporaryPath.c_str());
+            return;
+        }
         auto corlib = il2cpp_get_corlib();
         auto assemblyClass = il2cpp_class_from_name(corlib, "System.Reflection", "Assembly");
+        if (!assemblyClass) {
+            LOGE("System.Reflection.Assembly not found");
+            outStream.close();
+            std::remove(temporaryPath.c_str());
+            return;
+        }
         auto assemblyLoad = il2cpp_class_get_method_from_name(assemblyClass, "Load", 1);
         auto assemblyGetTypes = il2cpp_class_get_method_from_name(assemblyClass, "GetTypes", 0);
         if (assemblyLoad && assemblyLoad->methodPointer) {
             LOGI("Assembly::Load: %p", assemblyLoad->methodPointer);
         } else {
             LOGI("miss Assembly::Load");
+            outStream.close();
+            std::remove(temporaryPath.c_str());
             return;
         }
         if (assemblyGetTypes && assemblyGetTypes->methodPointer) {
             LOGI("Assembly::GetTypes: %p", assemblyGetTypes->methodPointer);
         } else {
             LOGI("miss Assembly::GetTypes");
+            outStream.close();
+            std::remove(temporaryPath.c_str());
             return;
         }
         typedef void *(*Assembly_Load_ftn)(void *, Il2CppString *, void *);
         typedef Il2CppArray *(*Assembly_GetTypes_ftn)(void *, void *);
-        for (int i = 0; i < size; ++i) {
+        for (size_t i = 0; i < size; ++i) {
             auto image = il2cpp_assembly_get_image(assemblies[i]);
-            std::stringstream imageStr;
+            if (!image) continue;
             auto image_name = il2cpp_image_get_name(image);
-            imageStr << "\n// Dll : " << image_name;
-            //LOGD("image name : %s", image->name);
+            if (!image_name) image_name = "Unknown";
+            outStream << "\n// Dll : " << image_name << "\n";
             auto imageName = std::string(image_name);
             auto pos = imageName.rfind('.');
             auto imageNameNoExt = imageName.substr(0, pos);
@@ -404,26 +561,31 @@ void il2cpp_dump(const char *outDir) {
             auto reflectionAssembly = ((Assembly_Load_ftn) assemblyLoad->methodPointer)(nullptr,
                                                                                         assemblyFileName,
                                                                                         nullptr);
+            if (!reflectionAssembly) {
+                LOGW("Failed to load reflection assembly %s", imageNameNoExt.c_str());
+                continue;
+            }
             auto reflectionTypes = ((Assembly_GetTypes_ftn) assemblyGetTypes->methodPointer)(
                     reflectionAssembly, nullptr);
+            if (!reflectionTypes) continue;
             auto items = reflectionTypes->vector;
-            for (int j = 0; j < reflectionTypes->max_length; ++j) {
+            for (size_t j = 0; j < reflectionTypes->max_length; ++j) {
                 auto klass = il2cpp_class_from_system_type((Il2CppReflectionType *) items[j]);
+                if (!klass) continue;
+                semanticDumper.collect_class(image_name, klass);
                 auto type = il2cpp_class_get_type(klass);
-                //LOGD("type name : %s", il2cpp_type_get_name(type));
-                auto outPut = imageStr.str() + dump_type(type);
-                outPuts.push_back(outPut);
+                if (type) outStream << dump_type(type);
             }
         }
     }
-    LOGI("write dump file");
-    auto outPath = std::string(outDir).append("/files/dump.cs");
-    std::ofstream outStream(outPath);
-    outStream << imageOutput.str();
-    auto count = outPuts.size();
-    for (int i = 0; i < count; ++i) {
-        outStream << outPuts[i];
-    }
     outStream.close();
-    LOGI("dump done!");
+    if (!outStream || std::rename(temporaryPath.c_str(), outPath.c_str()) != 0) {
+        LOGE("Failed to write %s", outPath.c_str());
+        std::remove(temporaryPath.c_str());
+        return;
+    }
+    LOGI("dump.cs written");
+
+    semanticDumper.write_managed_json(filesDir + "/managed.json");
+    semanticDumper.write_native_json(filesDir + "/native.json");
 }

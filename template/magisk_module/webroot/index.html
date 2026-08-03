@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<title>Il2CppDumper</title>
+<style>
+body{background:#1a1a2e;color:#eee;font:14px system-ui;padding:16px}
+h2{color:#e94560}
+input{width:100%;padding:10px;margin:6px 0;border-radius:6px;border:none;font-size:14px;background:#16213e;color:#eee}
+button{width:100%;padding:10px;margin:6px 0;border-radius:6px;border:none;font-size:14px;background:#e94560;color:#fff;font-weight:bold}
+.box{background:#0f3460;padding:10px;border-radius:6px;margin:8px 0;font-size:12px}
+.box b{color:#e94560}
+ul{list-style:none;max-height:45vh;overflow-y:auto}
+li{padding:10px 12px;border-bottom:1px solid #16213e;display:flex;align-items:center;gap:10px;cursor:pointer}
+li.on{background:#0f3460}
+li span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+li input[type=checkbox]{accent-color:#e94560;width:18px;height:18px;cursor:pointer}
+</style>
+</head>
+<body>
+<h2>Il2CppDumper</h2>
+<div class="box">Selected: <b id="cur">0</b></div>
+<input id="q" placeholder="Filter..." oninput="render()">
+<ul id="list"><li>Loading...</li></ul>
+<button onclick="save()">Save Targets</button>
+
+<script>
+var TF='/data/adb/modules/zygisk_il2cppdumper/target.txt';
+var apps=[], sel={};
+
+// Probe known ksu APIs — shown at bottom, not overwritten
+(function(){
+  var info=[];
+  if(window.ksu&&window.ksu.getPackagesInfo) info.push('getPackagesInfo:✅');
+  if(window.ksu&&window.ksu.exec) info.push('exec:✅');
+  if(window.ksu&&window.ksu.getAppInfo) info.push('getAppInfo:✅');
+  if(window.parent&&window.parent.runShell) info.push('parent.runShell:✅');
+  if(typeof window.ksu==='function') info.push('ksu=function');
+  var div=document.createElement('div');
+  div.style.cssText='font-size:10px;color:#666;margin-top:8px';
+  div.textContent='API: '+(info.length?info.join('; '):'nothing (ksu='+typeof window.ksu+')');
+  document.body.appendChild(div);
+})();
+
+function run(cmd,cb){
+  if(typeof window.ksu==='function'){
+    var id='k'+Date.now()+Math.random().toString(36).slice(2);
+    window[id]=function(c,o,e){try{delete window[id]}catch(x){};cb(c,o||'',e||'');};
+    window.ksu(cmd,'{}',id);
+    return;
+  }
+  if(window.ksu&&window.ksu.exec){
+    var id='e'+Date.now()+Math.random().toString(36).slice(2);
+    window[id]=function(c,o,e){try{delete window[id]}catch(x){};cb(c,o||'',e||'');};
+    window.ksu.exec(cmd,'{}',id);
+    return;
+  }
+  if(window.parent&&window.parent.runShell){
+    window.parent.runShell(cmd).then(function(o){cb(0,o,'');},function(e){cb(1,'',String(e));});
+    return;
+  }
+  cb(1,'','no API');
+}
+
+run('pm list packages -3',function(c,out){
+  apps=(out||'').split('\n').filter(function(l){return l.indexOf('package:')===0}).map(function(l){return l.slice(8)}).sort();
+  if(!apps.length){
+    run('pm list packages',function(c2,out2){
+      apps=(out2||'').split('\n').filter(function(l){return l.indexOf('package:')===0}).map(function(l){return l.slice(8)}).sort();
+      loadTargets();
+    });
+  } else loadTargets();
+});
+
+function loadTargets(){
+  run('cat '+TF,function(c,data){
+    sel={};
+    var lines=(data||'').split('\n');
+    for(var i=0;i<lines.length;i++){
+      var l=lines[i].trim();
+      if(l) sel[l]=true;
+    }
+    updateCount();
+    render();
+  });
+}
+
+function updateCount(){
+  var n=0;for(var k in sel)if(sel[k])n++;
+  document.getElementById('cur').textContent=n;
+}
+
+function render(){
+  var q=(document.getElementById('q').value||'').toLowerCase(),h='';
+  for(var i=0;i<apps.length;i++){
+    var p=apps[i];
+    if(q&&p.toLowerCase().indexOf(q)<0) continue;
+    h+='<li class="'+(sel[p]?'on':'')+'"><input type="checkbox" '+(sel[p]?'checked':'')+' onchange="toggle(\''+p.replace(/'/g,'&#39;')+'\',this.checked)"><span>'+p+'</span></li>';
+  }
+  document.getElementById('list').innerHTML=h||'<li>No match</li>';
+}
+
+function toggle(pkg,v){
+  if(v) sel[pkg]=true; else delete sel[pkg];
+  updateCount();
+  var li=document.querySelectorAll('li');
+  for(var j=0;j<li.length;j++){
+    var span=li[j].querySelector('span');
+    if(span&&span.textContent===pkg) li[j].className=v?'on':'';
+  }
+}
+
+function save(){
+  var lines=[];
+  for(var k in sel)if(sel[k])lines.push(k.replace(/'/g,"'\\''"));
+  var cmd=lines.length?'printf "%s\\n" '+lines.join(' ')+' > '+TF:'rm -f '+TF;
+  run(cmd,function(c){
+    updateCount();
+  });
+}
+</script>
+</body>
+</html>
