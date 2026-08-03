@@ -133,12 +133,21 @@ std::string SemanticDumper::make_method_id(const std::string &assembly, uint32_t
 
 void SemanticDumper::collect_class(const char *assembly_name, Il2CppClass *klass) {
     if (!klass) return;
+    ++type_count_;
 
     const std::string assembly = strip_image_extension(assembly_name);
     const char *raw_namespace = il2cpp_class_get_namespace(klass);
     const std::string namespaze = raw_namespace ? raw_namespace : "";
-    const std::string declaring_type = il2cpp_type_display_name(il2cpp_class_get_type(klass));
+    const Il2CppType *class_type = il2cpp_class_get_type(klass);
+    const std::string declaring_type = il2cpp_type_display_name(class_type);
     const bool is_interface = (il2cpp_class_get_flags(klass) & TYPE_ATTRIBUTE_INTERFACE) != 0;
+    const std::string type_id = "managed-type:" + assembly + ":" + declaring_type;
+    metadata_targets_.push_back({reinterpret_cast<uint64_t>(klass), "type_info", type_id,
+                                 declaring_type});
+    if (class_type) {
+        metadata_targets_.push_back({reinterpret_cast<uint64_t>(class_type), "type_ref", type_id,
+                                     declaring_type});
+    }
 
     void *iterator = nullptr;
     while (auto method_info = il2cpp_class_get_methods(klass, &iterator)) {
@@ -184,6 +193,8 @@ void SemanticDumper::collect_class(const char *assembly_name, Il2CppClass *klass
         signature << ')';
         entry.signature = signature.str();
         entry.id = make_method_id(assembly, entry.token, entry.signature);
+        metadata_targets_.push_back({reinterpret_cast<uint64_t>(method_info), "method_info",
+                                     entry.id, entry.signature});
 
         if (entry.has_observed_method_pointer) {
             const uint64_t observed_va = reinterpret_cast<uint64_t>(method_info->methodPointer);
@@ -195,6 +206,10 @@ void SemanticDumper::collect_class(const char *assembly_name, Il2CppClass *klass
                     native->second.observed_va = observed_va;
                     native->second.id = "native:rva:0x" + hex_value(rva);
                 }
+                if (std::find(native->second.sources.begin(), native->second.sources.end(),
+                              "runtime_method_pointer") == native->second.sources.end()) {
+                    native->second.sources.emplace_back("runtime_method_pointer");
+                }
                 entry.native_function_id = native->second.id;
                 entry.binding_kind = entry.has_native_implementation
                         ? "runtime_method_pointer"
@@ -203,6 +218,58 @@ void SemanticDumper::collect_class(const char *assembly_name, Il2CppClass *klass
             }
         }
         methods_.push_back(std::move(entry));
+    }
+
+    void *field_iterator = nullptr;
+    while (auto field = il2cpp_class_get_fields(klass, &field_iterator)) {
+        const char *raw_field_name = il2cpp_field_get_name(field);
+        const std::string field_name = raw_field_name ? raw_field_name : "?";
+        const std::string qualified_name = declaring_type + "::" + field_name;
+        metadata_targets_.push_back({reinterpret_cast<uint64_t>(field), "field_info",
+                                     "managed-field:" + assembly + ":" + qualified_name,
+                                     qualified_name});
+    }
+}
+
+void SemanticDumper::collect_registration(const std::vector<std::string> &image_names) {
+    RuntimeRegistrationScanner scanner;
+    registration_ = scanner.scan(image_names.size(), type_count_, metadata_targets_);
+
+    std::map<std::string, uint64_t> module_method_counts;
+    for (const auto &module : registration_.modules) {
+        module_method_counts[strip_image_extension(module.name.c_str())] = module.method_pointer_count;
+    }
+    std::map<std::string, uint64_t> method_definition_starts;
+    uint64_t method_definition_start = 0;
+    for (const auto &image_name : image_names) {
+        const std::string assembly = strip_image_extension(image_name.c_str());
+        method_definition_starts[assembly] = method_definition_start;
+        const auto count = module_method_counts.find(assembly);
+        if (count != module_method_counts.end()) method_definition_start += count->second;
+    }
+    for (auto &method : methods_) {
+        const auto start = method_definition_starts.find(method.assembly);
+        const uint32_t row = method.token & 0x00ffffff;
+        const auto count = module_method_counts.find(method.assembly);
+        if (start != method_definition_starts.end() && count != module_method_counts.end() &&
+            row > 0 && row <= count->second) {
+            method.method_definition_index = static_cast<int64_t>(start->second + row - 1);
+        }
+    }
+    for (const auto &pointer : registration_.method_pointers) {
+        const uint64_t observed_va = pointer.address;
+        if (!il2cpp_base || observed_va < il2cpp_base) continue;
+        const uint64_t rva = observed_va - il2cpp_base;
+        auto [native, inserted] = native_functions_.try_emplace(rva);
+        if (inserted) {
+            native->second.rva = rva;
+            native->second.observed_va = observed_va;
+            native->second.id = "native:rva:0x" + hex_value(rva);
+        }
+        if (std::find(native->second.sources.begin(), native->second.sources.end(), pointer.source) ==
+            native->second.sources.end()) {
+            native->second.sources.push_back(pointer.source);
+        }
     }
 }
 
@@ -233,6 +300,10 @@ bool SemanticDumper::write_managed_json(const std::string &out_path) const {
         write_json_string(output, "DeclaringType", method.declaring_type);
         write_json_string(output, "Method", method.method);
         output << "      \"Token\": " << method.token << ",\n"
+               << "      \"MethodDefinitionIndex\": ";
+        if (method.method_definition_index >= 0) output << method.method_definition_index;
+        else output << "null";
+        output << ",\n"
                << "      \"Flags\": " << method.flags << ",\n"
                << "      \"IsStatic\": " << (method.is_static ? "true" : "false") << ",\n"
                << "      \"IsAbstract\": " << (method.is_abstract ? "true" : "false") << ",\n"
@@ -280,6 +351,13 @@ bool SemanticDumper::write_native_json(const std::string &out_path) const {
         return false;
     }
 
+    size_t metadata_slot_count = 0;
+    size_t pointer_reference_count = 0;
+    for (const auto &slot : registration_.metadata_slots) {
+        if (slot.target_id.rfind("metadata-type:", 0) == 0) ++pointer_reference_count;
+        else ++metadata_slot_count;
+    }
+
     output << "{\n"
            << "  \"SchemaVersion\": 2,\n"
            << "  \"Kind\": \"IL2CPP native runtime index\",\n"
@@ -290,11 +368,64 @@ bool SemanticDumper::write_native_json(const std::string &out_path) const {
            << "  },\n"
            << "  \"Capabilities\": {\n"
            << "    \"RuntimeMethodPointers\": true,\n"
-           << "    \"RegistrationMetadata\": false,\n"
+           << "    \"RegistrationMetadata\": "
+           << (registration_.metadata_registration_found ? "true" : "false") << ",\n"
+           << "    \"CodeGenModules\": "
+           << (registration_.codegen_modules_found ? "true" : "false") << ",\n"
+           << "    \"GenericMethodPointers\": "
+           << (registration_.generic_method_pointers_found ? "true" : "false") << ",\n"
            << "    \"NativeSymbols\": false,\n"
-           << "    \"GenericInstances\": false,\n"
+           << "    \"GenericInstances\": "
+           << (!registration_.generic_instances.empty() ? "true" : "false") << ",\n"
            << "    \"StringLiterals\": false,\n"
-           << "    \"MetadataSlots\": false\n"
+           << "    \"RuntimeMetadataSlots\": " << (metadata_slot_count ? "true" : "false") << ",\n"
+           << "    \"PointerReferences\": " << (pointer_reference_count ? "true" : "false") << ",\n"
+           << "    \"StaticMetadataUsageTable\": false\n"
+           << "  },\n"
+           << "  \"Registration\": {\n";
+    write_json_string(output, "Status", registration_.status, true, 4);
+    output << "    \"MetadataRegistrationRVA\": ";
+    if (registration_.metadata_registration_address >= il2cpp_base) {
+        output << registration_.metadata_registration_address - il2cpp_base;
+    } else {
+        output << "null";
+    }
+    output << ",\n    \"CodeGenModulesFieldRVA\": ";
+    if (registration_.codegen_modules_field_address >= il2cpp_base) {
+        output << registration_.codegen_modules_field_address - il2cpp_base;
+    } else {
+        output << "null";
+    }
+    output << ",\n    \"GenericMethodPointersFieldRVA\": ";
+    if (registration_.generic_method_pointers_field_address >= il2cpp_base) {
+        output << registration_.generic_method_pointers_field_address - il2cpp_base;
+    } else {
+        output << "null";
+    }
+    output << ",\n"
+           << "    \"GenericMethodPointerCount\": " << registration_.generic_method_pointer_count << ",\n"
+           << "    \"GenericMethodTableCount\": " << registration_.generic_method_table_count << ",\n"
+           << "    \"MethodSpecsCount\": " << registration_.method_specs_count << ",\n"
+           << "    \"DecodedGenericInstanceCount\": " << registration_.generic_instances.size() << ",\n"
+           << "    \"MetadataSlotCount\": " << metadata_slot_count << ",\n"
+           << "    \"PointerReferenceCount\": " << pointer_reference_count << ",\n"
+           << "    \"Diagnostics\": {\n"
+           << "      \"CodeGenCountMatches\": " << registration_.codegen_count_matches << ",\n"
+           << "      \"CodeGenArrayMatches\": " << registration_.codegen_array_matches << ",\n"
+           << "      \"CodeGenMaxValidModules\": " << registration_.codegen_max_valid_modules << ",\n"
+           << "      \"GenericTableStride\": " << registration_.generic_table_stride << "\n"
+           << "    },\n"
+           << "    \"CodeGenModules\": [\n";
+    for (size_t module_index = 0; module_index < registration_.modules.size(); ++module_index) {
+        const auto &module = registration_.modules[module_index];
+        output << "      {\n";
+        write_json_string(output, "Name", module.name, true, 8);
+        output << "        \"RVA\": "
+               << (module.address >= il2cpp_base ? module.address - il2cpp_base : 0) << ",\n"
+               << "        \"MethodPointerCount\": " << module.method_pointer_count << "\n"
+               << "      }" << (module_index + 1 < registration_.modules.size() ? "," : "") << '\n';
+    }
+    output << "    ]\n"
            << "  },\n"
            << "  \"NativeFunctionCount\": " << native_functions_.size() << ",\n"
            << "  \"NativeFunctions\": [\n";
@@ -312,14 +443,115 @@ bool SemanticDumper::write_native_json(const std::string &out_path) const {
                    << (method_index + 1 < function.managed_method_ids.size() ? "," : "") << '\n';
         }
         output << "      ],\n"
-               << "      \"Source\": \"runtime_method_pointer\",\n"
+               << "      \"Sources\": [";
+        for (size_t source_index = 0; source_index < function.sources.size(); ++source_index) {
+            output << "\"" << escape_json(function.sources[source_index]) << "\"";
+            if (source_index + 1 < function.sources.size()) output << ',';
+        }
+        output << "],\n"
                << "      \"Confidence\": \"high\"\n"
                << "    }" << (++index < native_functions_.size() ? "," : "") << '\n';
     }
     output << "  ],\n"
-           << "  \"GenericInstances\": [],\n"
+           << "  \"GenericInstances\": [\n";
+    std::map<int64_t, std::string> method_ids_by_definition;
+    for (const auto &method : methods_) {
+        if (method.method_definition_index >= 0) {
+            method_ids_by_definition[method.method_definition_index] = method.id;
+        }
+    }
+    for (size_t instance_index = 0; instance_index < registration_.generic_instances.size();
+         ++instance_index) {
+        const auto &instance = registration_.generic_instances[instance_index];
+        output << "    {\n"
+               << "      \"MethodSpecIndex\": " << instance.method_spec_index << ",\n"
+               << "      \"MethodDefinitionIndex\": " << instance.method_definition_index << ",\n"
+               << "      \"MethodPointerIndex\": " << instance.method_pointer_index << ",\n"
+               << "      \"ManagedMethodId\": ";
+        const auto managed = method_ids_by_definition.find(instance.method_definition_index);
+        if (managed != method_ids_by_definition.end()) {
+            output << "\"" << escape_json(managed->second) << "\"";
+        } else {
+            output << "null";
+        }
+        output << ",\n      \"NativeFunctionId\": ";
+        if (instance.native_address >= il2cpp_base) {
+            output << "\"native:rva:0x" << hex_value(instance.native_address - il2cpp_base) << "\"";
+        } else {
+            output << "null";
+        }
+        output << ",\n      \"ClassTypeArguments\": [";
+        for (size_t argument_index = 0; argument_index < instance.class_type_arguments.size();
+             ++argument_index) {
+            const auto type = reinterpret_cast<const Il2CppType *>(
+                    instance.class_type_arguments[argument_index]);
+            output << "\"" << escape_json(il2cpp_type_display_name(type)) << "\"";
+            if (argument_index + 1 < instance.class_type_arguments.size()) output << ',';
+        }
+        output << "],\n      \"MethodTypeArguments\": [";
+        for (size_t argument_index = 0; argument_index < instance.method_type_arguments.size();
+             ++argument_index) {
+            const auto type = reinterpret_cast<const Il2CppType *>(
+                    instance.method_type_arguments[argument_index]);
+            output << "\"" << escape_json(il2cpp_type_display_name(type)) << "\"";
+            if (argument_index + 1 < instance.method_type_arguments.size()) output << ',';
+        }
+        output << "],\n"
+               << "      \"Source\": \"runtime_registration\",\n"
+               << "      \"Confidence\": \"high\"\n"
+               << "    }" << (instance_index + 1 < registration_.generic_instances.size() ? "," : "")
+               << '\n';
+    }
+    output << "  ],\n"
            << "  \"StringLiterals\": [],\n"
-           << "  \"MetadataSlots\": [],\n"
+           << "  \"MetadataSlots\": [\n";
+    size_t written_metadata_slots = 0;
+    for (const auto &slot : registration_.metadata_slots) {
+        if (slot.target_id.rfind("metadata-type:", 0) == 0) continue;
+        std::string target_name = slot.target_name;
+        if (target_name.empty() && slot.target_kind == "type_ref") {
+            target_name = il2cpp_type_display_name(
+                    reinterpret_cast<const Il2CppType *>(slot.target_address));
+        } else if (target_name.empty() && slot.target_kind == "type_info") {
+            auto klass = reinterpret_cast<Il2CppClass *>(slot.target_address);
+            target_name = il2cpp_type_display_name(il2cpp_class_get_type(klass));
+        }
+        output << "    {\n"
+               << "      \"SlotRVA\": " << (slot.address - il2cpp_base) << ",\n"
+               << "      \"ObservedTargetVA\": " << slot.target_address << ",\n";
+        write_json_string(output, "TargetKind", slot.target_kind);
+        write_json_string(output, "TargetId", slot.target_id);
+        write_json_string(output, "TargetName", target_name);
+        output << "      \"Source\": \"runtime_pointer_scan\",\n"
+               << "      \"Confidence\": \"high\"\n"
+               << "    }" << (++written_metadata_slots < metadata_slot_count ? "," : "")
+               << '\n';
+    }
+    output << "  ],\n"
+           << "  \"PointerReferences\": [\n";
+    size_t written_pointer_references = 0;
+    for (const auto &slot : registration_.metadata_slots) {
+        if (slot.target_id.rfind("metadata-type:", 0) != 0) continue;
+        std::string target_name;
+        if (slot.target_kind == "type_ref") {
+            target_name = il2cpp_type_display_name(
+                    reinterpret_cast<const Il2CppType *>(slot.target_address));
+        } else if (slot.target_kind == "type_info") {
+            auto klass = reinterpret_cast<Il2CppClass *>(slot.target_address);
+            target_name = il2cpp_type_display_name(il2cpp_class_get_type(klass));
+        }
+        output << "    {\n"
+               << "      \"ReferenceRVA\": " << (slot.address - il2cpp_base) << ",\n"
+               << "      \"ObservedTargetVA\": " << slot.target_address << ",\n";
+        write_json_string(output, "TargetKind", slot.target_kind);
+        write_json_string(output, "TargetId", slot.target_id);
+        write_json_string(output, "TargetName", target_name);
+        output << "      \"Source\": \"registration_pointer_scan\",\n"
+               << "      \"Confidence\": \"high\"\n"
+               << "    }" << (++written_pointer_references < pointer_reference_count ? "," : "")
+               << '\n';
+    }
+    output << "  ],\n"
            << "  \"UnresolvedRecords\": []\n"
            << "}\n";
 

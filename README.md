@@ -18,7 +18,7 @@ The target application's `files` directory receives:
 - `managed.json`: complete managed runtime method semantics, including methods without native code.
 - `native.json`: native functions deduplicated by RVA and their many-to-many managed bindings.
 
-The first native schema version contains only reliably observed runtime method pointers. Check `Capabilities` before consuming registration metadata, generic instances, strings, or metadata slots.
+The native index also performs range-checked runtime registration discovery for codegen modules and generic method pointers. Check `Capabilities` before consuming optional data; generic instance names, strings, and metadata slots remain staged work.
 
 ## Standalone Build
 

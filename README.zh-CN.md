@@ -16,7 +16,7 @@
 - `managed.json`：完整的运行时托管方法语义，包括无原生实现的方法。
 - `native.json`：按 RVA 去重的原生函数索引，以及与托管方法的多对多关系。
 
-`native.json` 第一阶段只包含运行时可可靠观测的方法指针。registration metadata、泛型实例、字符串和 metadata slots 会在后续版本逐步加入，文件中的 `Capabilities` 会明确标记当前支持范围。
+`native.json` 还会通过严格范围校验尝试定位运行时 registration，恢复 codegen modules 和 generic method pointers。泛型实例名称、字符串及 metadata slots 仍会分阶段加入，消费数据前应检查 `Capabilities`。
 
 ## 独立构建
 

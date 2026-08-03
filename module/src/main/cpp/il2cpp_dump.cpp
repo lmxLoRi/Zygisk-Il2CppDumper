@@ -478,10 +478,12 @@ void il2cpp_dump(const char *outDir) {
     }
 
     std::stringstream imageOutput;
+    std::vector<std::string> imageNames;
     for (size_t i = 0; i < size; ++i) {
         auto image = il2cpp_assembly_get_image(assemblies[i]);
         const char *imageName = image ? il2cpp_image_get_name(image) : nullptr;
         imageOutput << "// Image " << i << ": " << (imageName ? imageName : "Unknown") << "\n";
+        imageNames.emplace_back(imageName ? imageName : "Unknown");
     }
 
     const std::string filesDir = std::string(outDir) + "/files";
@@ -586,6 +588,7 @@ void il2cpp_dump(const char *outDir) {
     }
     LOGI("dump.cs written");
 
+    semanticDumper.collect_registration(imageNames);
     semanticDumper.write_managed_json(filesDir + "/managed.json");
     semanticDumper.write_native_json(filesDir + "/native.json");
 }

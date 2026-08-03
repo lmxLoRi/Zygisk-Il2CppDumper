@@ -4,6 +4,6 @@ ext {
     moduleName = "Il2CppDumper"
     moduleAuthor = "Perfare"
     moduleDescription = "Runtime IL2CPP dumps for AI-assisted analysis. Configure targets in Web UI."
-    moduleVersion = "v1.3.0"
-    moduleVersionCode = 2
+    moduleVersion = "v1.4.0"
+    moduleVersionCode = 3
 }

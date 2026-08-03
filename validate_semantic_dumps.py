@@ -58,13 +58,46 @@ def main() -> int:
     for function in functions:
         assert function["ObservedVA"] == image_base + function["RVA"]
         assert function["IsShared"] == (len(function["ManagedMethodIds"]) > 1)
+        sources = function.get("Sources") or ([function["Source"]] if function.get("Source") else [])
+        assert sources, f"native function has no source: {function['Id']}"
         for method_id in function["ManagedMethodIds"]:
             assert method_id in method_by_id, f"missing managed method: {method_id}"
             assert method_by_id[method_id]["NativeFunctionId"] == function["Id"]
 
     assert managed["NativeBindingCount"] == bound_count
+    registration_only = sum(not item["ManagedMethodIds"] for item in functions)
+    registration = native.get("Registration", {})
+    generic_instances = native.get("GenericInstances", [])
+    for instance in generic_instances:
+        native_id = instance["NativeFunctionId"]
+        if native_id is not None:
+            assert native_id in function_by_id
+        managed_id = instance.get("ManagedMethodId")
+        if managed_id is not None:
+            assert managed_id in method_by_id
+            assert method_by_id[managed_id].get("MethodDefinitionIndex") == instance["MethodDefinitionIndex"]
+    metadata_slots = native.get("MetadataSlots", [])
+    slot_keys = {(item["SlotRVA"], item["TargetKind"], item["TargetId"]) for item in metadata_slots}
+    assert len(slot_keys) == len(metadata_slots), "duplicate metadata slot relation"
+    for slot in metadata_slots:
+        assert slot["SlotRVA"] >= 0
+        if slot["TargetKind"] == "method_info":
+            assert slot["TargetId"] in method_by_id
+    if registration.get("MetadataSlotCount") is not None:
+        assert registration["MetadataSlotCount"] == len(metadata_slots)
+    pointer_references = native.get("PointerReferences", [])
+    reference_keys = {(item["ReferenceRVA"], item["TargetKind"], item["TargetId"])
+                      for item in pointer_references}
+    assert len(reference_keys) == len(pointer_references), "duplicate pointer reference"
+    if registration.get("PointerReferenceCount") is not None:
+        assert registration["PointerReferenceCount"] == len(pointer_references)
     print(f"valid: {len(methods)} managed methods, {len(functions)} native functions, "
-          f"{bound_count} bindings")
+          f"{bound_count} bindings, {registration_only} registration-only functions, "
+          f"{len(generic_instances)} generic instances, {len(metadata_slots)} metadata slots, "
+          f"{len(pointer_references)} pointer references")
+    if registration:
+        print(f"registration: {registration.get('Status', 'unknown')}, "
+              f"{registration.get('GenericMethodPointerCount', 0)} generic pointers")
     return 0
 
 

@@ -19,7 +19,7 @@ LLVM_STRIP="${LLVM_STRIP:-llvm-strip-18}"
 MODULE_NAME="il2cppdumper"
 
 echo "╔══════════════════════════════════════════════╗"
-echo "║  Zygisk-Il2CppDumper v1.3.0 Standalone Build║"
+echo "║  Zygisk-Il2CppDumper v1.4.0 Standalone Build║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 if [ ! -d "$SYSROOT" ] || [ ! -d "$RESDIR" ]; then
@@ -46,6 +46,7 @@ CXX_SOURCES=(
     main.cpp
     hack.cpp
     il2cpp_dump.cpp
+    registration_dump.cpp
     semantic_dump.cpp
 )
 
@@ -147,7 +148,7 @@ package_module() {
 
     local magisk_dir="$OUT_DIR/magisk_module"
     local template_dir="$PROJECT_DIR/template/magisk_module"
-    local zip_name="zygisk-il2cppdumper-v1.3.0.zip"
+    local zip_name="zygisk-il2cppdumper-v1.4.0.zip"
 
     rm -rf "$magisk_dir"
     mkdir -p "$magisk_dir/zygisk"
@@ -160,8 +161,8 @@ package_module() {
     cat > "$magisk_dir/module.prop" << EOF
 id=zygisk_il2cppdumper
 name=Il2CppDumper
-version=v1.3.0
-versionCode=2
+version=v1.4.0
+versionCode=3
 author=Perfare (extended)
 description=Runtime IL2CPP dumps for AI-assisted analysis. Configure targets in Web UI.
 EOF

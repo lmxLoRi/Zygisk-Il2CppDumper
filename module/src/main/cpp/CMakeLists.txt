@@ -37,6 +37,7 @@ add_library(${MODULE_NAME} SHARED
         main.cpp
         hack.cpp
         il2cpp_dump.cpp
+        registration_dump.cpp
         semantic_dump.cpp
         ${xdl-src})
 target_link_libraries(${MODULE_NAME} log)

@@ -18,6 +18,12 @@ Each parameter is structured as `Position`, `Name`, `Type`, and `Modifier`. `Man
 
 `NativeFunctions` contains one record per observed RVA. `ManagedMethodIds` is the reverse edge to `managed.json`; `IsShared` indicates more than one managed method currently points to the function.
 
+`Registration` reports the independently validated runtime registration anchors, codegen modules, and generic method pointer count. Registration-only native functions intentionally have an empty `ManagedMethodIds` array until method-spec decoding can provide a reliable managed identity.
+
+`GenericInstances` links each decoded method spec to its native function, base managed method, class type arguments, and method type arguments. `MethodDefinitionIndex` is also emitted on managed methods so this relation remains machine-checkable without parsing display signatures.
+
+`MetadataSlots` contains initialized slots that point directly to objects independently observed through exported IL2CPP APIs. `PointerReferences` contains additional exact references discovered from registration type tables. Both are runtime observations and are intentionally distinguished from the unsupported complete static metadata usage table.
+
 `Capabilities` is authoritative. Empty arrays whose capability is `false` mean that the current dumper did not collect that category, not that the target contains no such records.
 
 ## Unknown data

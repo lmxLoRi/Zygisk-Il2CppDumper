@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "registration_dump.h"
+
 struct Il2CppClass;
 struct Il2CppType;
 
@@ -28,6 +30,7 @@ struct ManagedMethodEntry {
     std::string signature;
     std::string native_function_id;
     std::string binding_kind;
+    int64_t method_definition_index = -1;
     uint32_t token;
     uint32_t flags;
     bool is_static;
@@ -43,11 +46,13 @@ struct NativeFunctionEntry {
     uint64_t rva;
     uint64_t observed_va;
     std::vector<std::string> managed_method_ids;
+    std::vector<std::string> sources;
 };
 
 class SemanticDumper {
 public:
     void collect_class(const char *assembly_name, Il2CppClass *klass);
+    void collect_registration(const std::vector<std::string> &image_names);
     bool write_managed_json(const std::string &out_path) const;
     bool write_native_json(const std::string &out_path) const;
 
@@ -58,6 +63,9 @@ private:
     std::vector<ManagedMethodEntry> methods_;
     std::map<uint64_t, NativeFunctionEntry> native_functions_;
     std::map<std::string, uint32_t> method_id_counts_;
+    RuntimeRegistrationInfo registration_;
+    std::vector<MetadataTargetEntry> metadata_targets_;
+    size_t type_count_ = 0;
 };
 
 #endif
